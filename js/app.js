@@ -615,12 +615,31 @@ function Sheet({ open, expanded, indexes, jump, searchRef, onClose, onExpand }) 
     if (el) { el.hidden = false; el.scrollIntoView({ block: 'start' }); }
   };
 
+  // A hunt chip was clicked. If the hunt is not in the open document, find the
+  // one that has it and switch; this effect then runs again on the new one.
+  const handled = useRef(0);
   useEffect(() => {
-    if (!jump) return;
-    const target = toc.find((t) => t.text.startsWith(jump.key + '.') || t.text.startsWith(jump.key + ' '));
-    if (!target) { toast(`${jump.key} is not in this cheat sheet`); return; }
-    setQuery('');
-    setTimeout(() => goto(target.id), 0);
+    if (!jump || handled.current === jump.n || !toc.length) return undefined;
+    const has = (text) => text.startsWith(jump.key + '.') || text.startsWith(jump.key + ' ');
+    const target = toc.find((t) => has(t.text));
+    if (target) {
+      handled.current = jump.n;
+      setQuery('');
+      setTimeout(() => goto(target.id), 0);
+      return undefined;
+    }
+    let stale = false;
+    (async () => {
+      for (const d of docs) {
+        if (d.file === file) continue;
+        const md = await fetch('cheatsheets/' + d.file).then((r) => (r.ok ? r.text() : '')).catch(() => '');
+        if (stale) return;
+        if (md.split('\n').some((line) => /^#{1,3}\s/.test(line) && has(line.replace(/^#+\s+/, '')))) { setFile(d.file); return; }
+      }
+      handled.current = jump.n;
+      toast(`${jump.key} is not in any cheat sheet`);
+    })();
+    return () => { stale = true; };
   }, [jump, toc]);
 
   const onBodyClick = (e) => {

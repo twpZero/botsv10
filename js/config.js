@@ -24,7 +24,7 @@ export const CONFIG = {
   // helpers. Both can be edited per room from the scenario header.
   scenarios: [
     { id: 'general', name: 'General', indexes: '', hunts: 'H0 H12 H13 H14' },
-    { id: 's1', name: '1 Cats and Dawgs', indexes: '', hunts: 'H18 H6 H14' },
+    { id: 's1', name: '1 Cats and Dawgs', indexes: 'main', hunts: 'H18 H6 H14' },
     { id: 's2', name: '2 Hot Dog Heist', indexes: '', hunts: 'H1 H3 H4 H5 H7 H9' },
     { id: 's3', name: '3 Hops of Deception', indexes: '', hunts: 'H15 H5 H11' },
     { id: 's4', name: '4 Zero Chill', indexes: 'main, frothxly', hunts: 'H19 H1 H2 H3 H13' },

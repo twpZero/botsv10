@@ -22,7 +22,7 @@ accounts, no build step.
 - **Cheat sheet.** A side panel with a document picker, a section picker and a
   search box. Every search has a Copy button, and `index=*` is replaced by the
   current scenario's indexes. The `H18`-style chips in a scenario header jump
-  to that hunt.
+  to that hunt, switching document if needed.
 - **Shared clock**, Markdown export, and backup/restore from the menu.
 
 Keys, when the caret is not in a field: `c` cheat sheet, `/` search it, `q` add

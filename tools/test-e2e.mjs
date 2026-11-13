@@ -140,6 +140,18 @@ await step('the cheat sheet opens, jumps to a hunt and fills in the scenario ind
   await a.waitForFunction(() => { const n = document.querySelectorAll('.sheet-body > section:not([hidden])').length; return n >= 1 && n < 5; });
   await a.locator('.sheet-body > section:not([hidden]) .copy-btn').first().click();
   assert.match(await a.evaluate(() => navigator.clipboard.readText()), /index IN \(main, frothxly\)/);
+  await a.getByLabel('Search the cheat sheet').fill('');
+  // A second document, and a hunt chip that has to switch back to the first.
+  await a.locator('.sheet-doc').selectOption({ label: 'Scenario 1 write-up digest: Cats and Dawgs' });
+  await a.waitForFunction(() => /write-up digest/.test((document.querySelector('.sheet-body h1') || {}).textContent || ''));
+  assert.equal(await a.locator('.sheet-body table').count(), 2);
+  await a.locator('.hunt', { hasText: 'H13' }).click();
+  await a.waitForFunction(() => {
+    const h = [...document.querySelectorAll('.sheet-body h3')].find((x) => x.textContent.startsWith('H13.'));
+    const box = h && h.getBoundingClientRect();
+    return box && box.top > 0 && box.top < 400;
+  });
+  assert.equal(await a.locator('.sheet-doc').inputValue(), 'bots-v10-hunting.md');
   await a.getByLabel('Search the cheat sheet').press('Escape');
   await a.keyboard.press('c');
   await a.waitForSelector('.sheet', { state: 'hidden' });
