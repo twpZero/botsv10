@@ -15,12 +15,15 @@
   --danger: #f2686b;
   --violet: #b58cff;
   --shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  color-scheme: dark;
   --sans: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", sans-serif;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, "Noto Sans Mono CJK JP", monospace;
 }
 
+/* Light theme: the system setting unless the toggle chose dark, or the toggle
+   chose light. The two blocks must stay identical. */
 @media (prefers-color-scheme: light) {
-  :root {
+  :root:not([data-theme="dark"]) {
     --bg: #eef0f3;
     --surface: #ffffff;
     --raised: #f1f3f6;
@@ -35,7 +38,26 @@
     --danger: #c2333a;
     --violet: #6d41c9;
     --shadow: 0 12px 32px rgba(20, 30, 50, 0.18);
+    color-scheme: light;
   }
+}
+
+:root[data-theme="light"] {
+  --bg: #eef0f3;
+  --surface: #ffffff;
+  --raised: #f1f3f6;
+  --field: #ffffff;
+  --line: #d5dae2;
+  --text: #1a212b;
+  --muted: #586374;
+  --faint: #7f8a9a;
+  --accent-text: #8a5a00;
+  --info: #1c66c9;
+  --ok: #17794c;
+  --danger: #c2333a;
+  --violet: #6d41c9;
+  --shadow: 0 12px 32px rgba(20, 30, 50, 0.18);
+  color-scheme: light;
 }
 
 * { box-sizing: border-box; }
@@ -121,6 +143,10 @@ button.link {
 }
 
 .noscript { padding: 24px; }
+
+.chip.theme { padding: 4px 7px; color: var(--muted); }
+.chip.theme:hover { color: var(--text); }
+.join .chip.theme { position: fixed; top: 12px; right: 12px; }
 
 /* ------------------------------------------------------------ join */
 

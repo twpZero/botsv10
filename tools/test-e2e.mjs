@@ -198,6 +198,22 @@ await step('a field that was only focused does not overwrite a teammate', async 
   assert.equal(await b.getByLabel('Answer 3', { exact: true }).inputValue(), 'from-bob');
 });
 
+await step('the dark mode toggle switches the theme and survives a reload', async () => {
+  const bg = () => a.evaluate(() => getComputedStyle(document.body).backgroundColor);
+  const before = await bg();
+  await a.getByRole('button', { name: /^Switch to (light|dark) mode$/ }).click();
+  const after = await bg();
+  assert.notEqual(after, before);
+  const chosen = await a.evaluate(() => document.documentElement.dataset.theme);
+  assert.match(chosen, /^(light|dark)$/);
+  await a.reload();
+  await a.waitForSelector('.app');
+  assert.equal(await a.evaluate(() => document.documentElement.dataset.theme), chosen);
+  assert.equal(await bg(), after);
+  await a.getByRole('button', { name: /^Switch to (light|dark) mode$/ }).click();
+  assert.equal(await bg(), before);
+});
+
 await step('a reload returns to the room without asking for the password', async () => {
   await a.reload();
   await a.waitForSelector('.app');

@@ -139,6 +139,8 @@ const ICONS = {
   close: 'M4 4l8 8M12 4l-8 8',
   expand: 'M6 3H3v3M10 13h3v-3M3 3l4 4M13 13l-4-4',
   dock: 'M7 4v3H4M9 12V9h3M7 7L3 3M9 9l4 4',
+  sun: 'M8 5.2a2.8 2.8 0 1 0 0 5.6a2.8 2.8 0 0 0 0-5.6zM8 1.5V3M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M3.4 12.6l1.1-1.1M11.5 4.5l1.1-1.1',
+  moon: 'M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8z',
 };
 
 function Icon({ name }) {
@@ -246,6 +248,26 @@ function SharedText({ ytext, inputRef, ...rest }) {
   return html`<textarea ...${rest} ref=${ref} spellcheck=${false}></textarea>`;
 }
 
+// ---------------------------------------------------------------- theme
+
+const lightQuery = matchMedia('(prefers-color-scheme: light)');
+const activeTheme = () => document.documentElement.dataset.theme || (lightQuery.matches ? 'light' : 'dark');
+
+// Starts on the system setting; a click pins the other theme for this browser.
+function ThemeToggle() {
+  const [theme, setTheme] = useState(activeTheme);
+  useEffect(() => {
+    const onSystem = () => setTheme(activeTheme());
+    lightQuery.addEventListener('change', onSystem);
+    return () => lightQuery.removeEventListener('change', onSystem);
+  }, []);
+  const next = theme === 'dark' ? 'light' : 'dark';
+  return html`<button type="button" class="chip theme" title=${`Switch to ${next} mode`} aria-label=${`Switch to ${next} mode`}
+    onClick=${() => { document.documentElement.dataset.theme = next; store(localStorage, 'bn.theme', next); setTheme(next); }}>
+    <${Icon} name=${next === 'light' ? 'sun' : 'moon'} />
+  </button>`;
+}
+
 // ---------------------------------------------------------------- join screen
 
 function Join({ initialRoom, busy, error, onJoin, onForget }) {
@@ -265,6 +287,7 @@ function Join({ initialRoom, busy, error, onJoin, onForget }) {
   };
   return html`
     <main class="join">
+      <${ThemeToggle} />
       <form class="join-card" ref=${form} onSubmit=${submit}>
         <h1>${CONFIG.appName}</h1>
         <p class="lede">A shared notepad for a Boss of the SOC team: questions, answers, indicators and notes, in sync for everyone in the room.</p>
@@ -839,6 +862,7 @@ function Workspace({ room, session, onLeave }) {
         </span>
         <span class="spacer"></span>
         <${GameTimer} meta=${meta} />
+        <${ThemeToggle} />
         <button class=${'chip' + (sheet.open ? ' on' : '')} aria-pressed=${sheet.open} onClick=${() => openSheet({ open: !sheet.open })}>Cheat sheet</button>
         <details class="menu" ref=${menuRef}>
           <summary class="chip" aria-label="Room menu">Menu</summary>

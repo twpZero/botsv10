@@ -23,7 +23,8 @@ accounts, no build step.
   search box. Every search has a Copy button, and `index=*` is replaced by the
   current scenario's indexes. The `H18`-style chips in a scenario header jump
   to that hunt, switching document if needed.
-- **Shared clock**, Markdown export, and backup/restore from the menu.
+- **Shared clock**, a light/dark toggle, Markdown export, and backup/restore
+  from the menu.
 
 Keys, when the caret is not in a field: `c` cheat sheet, `/` search it, `q` add
 question, `i` add indicator, `n` notes, `1`–`9` scenario, `g` General, `Esc`
