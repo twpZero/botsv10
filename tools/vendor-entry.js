@@ -5,6 +5,8 @@ export { useState, useEffect, useRef, useMemo, useCallback, useLayoutEffect } fr
 import htm from 'htm';
 export { htm };
 export { marked } from 'marked';
+import DOMPurify from 'dompurify';
+export { DOMPurify };
 export { schnorr } from '@noble/curves/secp256k1';
 export { sha256 } from '@noble/hashes/sha2';
 export { bytesToHex, hexToBytes } from '@noble/hashes/utils';

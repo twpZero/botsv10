@@ -17,13 +17,14 @@ let relay = mockRelay(RELAY);
 const browser = await chromium.launch();
 const problems = [];
 
-async function open(name) {
+async function open(name, target = url) {
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, acceptDownloads: true });
   await ctx.grantPermissions(['clipboard-read', 'clipboard-write']);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => problems.push(`[${name}] ${e.message}`));
-  page.on('console', (m) => { if (m.type() === 'error' && !/WebSocket|ERR_CONNECTION/.test(m.text())) problems.push(`[${name}] ${m.text()}`); });
-  await page.goto(url);
+  // The 404 is the deliberately broken image in the sanitizer test.
+  page.on('console', (m) => { if (m.type() === 'error' && !/WebSocket|ERR_CONNECTION|status of 404/.test(m.text())) problems.push(`[${name}] ${m.text()}`); });
+  await page.goto(target);
   return page;
 }
 
@@ -122,6 +123,22 @@ await step('a wrong password is refused', async () => {
   await c.context().close();
 });
 
+await step('a wrong password is refused even seconds after a room is created', async () => {
+  const fresh = url.replace('#e2e-room', '#e2e-fresh-room');
+  const x = await open('X', fresh);
+  await join(x, 'Xena', 'right');
+  await x.waitForSelector('.app');
+  const y = await open('Y', fresh);
+  await join(y, 'Yann', 'wrong');
+  await y.waitForSelector('.join-error');
+  assert.equal(await y.locator('.app').count(), 0);
+  const z = await open('Z', fresh);
+  await join(z, 'Zoe', 'right');
+  await z.waitForSelector('.app');
+  await z.waitForSelector('.people .avatar[title="Xena"]');
+  for (const page of [x, y, z]) await page.context().close();
+});
+
 await step('the cheat sheet opens, jumps to a hunt and fills in the scenario indexes', async () => {
   await a.locator('body').click({ position: { x: 4, y: 500 } });
   await a.keyboard.press('c');
@@ -144,6 +161,78 @@ await step('the cheat sheet opens, jumps to a hunt and fills in the scenario ind
   await a.getByLabel('Search the cheat sheet').press('Escape');
   await a.keyboard.press('c');
   await a.waitForSelector('.sheet', { state: 'hidden' });
+});
+
+await step('cheat sheets are written, edited live, sanitized, copied, imported, hidden and deleted in the room', async () => {
+  const manage = async (page, item) => {
+    await page.locator('.sheet summary', { hasText: 'Manage' }).click();
+    await page.locator('.sheet .menu-list').getByRole('button', { name: item }).click();
+  };
+  const titles = (page) => page.evaluate(() => [...document.querySelectorAll('.sheet-doc option')].map((o) => o.textContent));
+  await a.getByRole('button', { name: 'Cheat sheet', exact: true }).click();
+  await b.getByRole('button', { name: 'Cheat sheet', exact: true }).click();
+  await a.waitForSelector('.sheet:not([hidden])');
+
+  // Write a new sheet, with hostile HTML in it.
+  await manage(a, 'New cheat sheet');
+  await a.getByLabel('Cheat sheet title').fill('Team playbook');
+  await a.getByLabel('Cheat sheet title').press('Enter');
+  const editor = a.getByLabel('Cheat sheet Markdown');
+  await editor.fill('# Team playbook\n\n## H99. Team hunt\n\n```\nindex=* sourcetype=team:log\n```\n\n<img src="x" onerror="window.__xss=1"><script>window.__xss=1</script><a href="javascript:window.__xss=1">bad</a>\n');
+  await a.waitForFunction(() => [...document.querySelectorAll('.sheet-body h2')].some((x) => x.textContent === 'H99. Team hunt'));
+
+  // The teammate sees it rendered, with indexes filled in and nothing executable.
+  await b.waitForFunction(() => [...document.querySelectorAll('.sheet-doc option')].some((o) => o.textContent === 'Team playbook'));
+  await b.locator('.sheet-doc').selectOption({ label: 'Team playbook' });
+  await b.waitForFunction(() => /index IN \(main, frothxly\) sourcetype=team:log/.test((document.querySelector('.sheet-body pre code') || {}).textContent || ''));
+  for (const page of [a, b]) {
+    assert.equal(await page.evaluate(() => window.__xss), undefined);
+    assert.equal(await page.locator('.sheet-body [onerror], .sheet-body script, .sheet-body a[href^="javascript"]').count(), 0);
+  }
+
+  // Edits show up in the teammate's rendered view while typing.
+  await editor.press('Control+End');
+  await a.keyboard.type('\n## Added live\n');
+  await b.waitForFunction(() => [...document.querySelectorAll('.sheet-body h2')].some((x) => x.textContent === 'Added live'));
+  await a.locator('.sheet-head').getByRole('button', { name: 'Done' }).click();
+  assert.equal(await editor.count(), 0);
+
+  // A hunt chip finds its section in a room sheet.
+  await a.locator('.sheet-doc').selectOption({ label: 'BOTS v10 hunting cheat sheet' });
+  await a.locator('.scenario-head').getByRole('button', { name: 'Edit' }).click();
+  await a.locator('.scenario-head .s-field input').fill('H19 H99');
+  await a.locator('.scenario-head').getByRole('button', { name: 'Done' }).click();
+  await a.locator('.hunt', { hasText: 'H99' }).click();
+  await a.waitForFunction(() => document.querySelector('.sheet-doc').selectedOptions[0].textContent === 'Team playbook');
+
+  // Copy the built-in sheet to edit it, then delete the copy.
+  await a.locator('.sheet-doc').selectOption({ label: 'BOTS v10 hunting cheat sheet' });
+  await a.locator('.sheet-head').getByRole('button', { name: 'Edit a copy' }).click();
+  await a.waitForSelector('.sheet.editing');
+  assert.match(await editor.inputValue(), /^# BOTS v10 Hunting Cheat Sheet/);
+  await b.waitForFunction(() => document.querySelectorAll('.sheet-doc optgroup[label="This room"] option').length === 2);
+  a.once('dialog', (d) => d.accept());
+  await manage(a, 'Delete this sheet');
+  await b.waitForFunction(() => document.querySelectorAll('.sheet-doc optgroup[label="This room"] option').length === 1);
+  assert.equal(await a.locator('.sheet.editing').count(), 0);
+
+  // Import a file.
+  await a.locator('.sheet input[type="file"]').setInputFiles({ name: 'osint.md', mimeType: 'text/markdown', buffer: Buffer.from('# OSINT kit\n\n## Tabs\n\n- VirusTotal\n') });
+  await b.waitForFunction(() => [...document.querySelectorAll('.sheet-doc option')].some((o) => o.textContent === 'OSINT kit'));
+  await a.waitForFunction(() => (document.querySelector('.sheet-body h1') || {}).textContent === 'OSINT kit');
+
+  // Hide and restore the built-in sheet for the room.
+  await a.locator('.sheet-doc').selectOption({ label: 'BOTS v10 hunting cheat sheet' });
+  await manage(a, 'Hide this built-in sheet');
+  await b.waitForFunction(() => !document.querySelector('.sheet-doc optgroup[label="Built in"]'));
+  await manage(b, /Show hidden built-in sheets/);
+  await a.waitForFunction(() => !!document.querySelector('.sheet-doc optgroup[label="Built in"]'));
+  assert.deepEqual(await titles(a), ['Team playbook', 'OSINT kit', 'BOTS v10 hunting cheat sheet']);
+
+  for (const page of [a, b]) {
+    await page.getByRole('button', { name: 'Close the cheat sheet' }).click();
+    await page.waitForSelector('.sheet', { state: 'hidden' });
+  }
 });
 
 await step('the game clock is shared', async () => {

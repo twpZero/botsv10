@@ -246,6 +246,8 @@ button.link {
 .is-live .dot, .dot.open { background: var(--ok); }
 .is-off .dot, .dot.closed { background: var(--danger); }
 .is-off { color: var(--danger); }
+.is-warn { color: var(--danger); border-color: var(--danger); }
+.is-warn .dot { background: var(--danger); }
 
 .people { display: inline-flex; align-items: center; gap: 4px; }
 .alone { color: var(--faint); margin-left: 4px; font-size: 12px; }
@@ -503,15 +505,33 @@ label.inline input { width: 80px; }
 }
 .sheet-head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto auto;
   gap: 6px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--line);
   align-items: center;
 }
-.sheet-head select { width: 100%; padding: 4px 6px; text-overflow: ellipsis; }
-.sheet-tools { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; }
-.sheet-tools input[type="search"] { flex: 1; padding: 4px 8px; }
+.sheet-head select { padding: 4px 6px; text-overflow: ellipsis; }
+.sheet-doc { width: 100%; font-weight: 600; }
+.sheet-tools { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; }
+.sheet-tools .sheet-toc { flex: 0 1 190px; min-width: 110px; }
+.sheet-tools input[type="search"] { flex: 1 1 120px; padding: 4px 8px; }
+.sheet-content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.sheet-msg { padding: 12px 16px; }
+.sheet.editing .sheet-content { display: grid; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
+.sheet.editing.expanded .sheet-content { grid-template-rows: minmax(0, 1fr); grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.sheet-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  min-height: 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+.sheet.editing.expanded .sheet-editor { border-bottom: 0; border-right: 1px solid var(--line); }
+.sheet-editor textarea { flex: 1; min-height: 0; resize: none; padding: 10px 12px; line-height: 1.55; tab-size: 2; }
+.sheet-title { font-weight: 600; font-size: 14px; padding: 5px 8px; }
 .check { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap; }
 .check code { font: 11.5px var(--mono); color: var(--accent-text); }
 

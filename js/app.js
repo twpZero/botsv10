@@ -1,4 +1,4 @@
-import { Y, h, render, useState, useEffect, useLayoutEffect, useRef, htm, marked } from '../vendor/vendor.js';
+import { Y, h, render, useState, useEffect, useLayoutEffect, useRef, htm, marked, DOMPurify } from '../vendor/vendor.js';
 import { CONFIG } from './config.js';
 import { Room, deriveKeys, keysFromBits, normRoom, forgetRoom, b64, unb64 } from './sync.js';
 import { TYPES, parseIndicators, parseQuestions, indexClause, pivotSpl } from './indicators.js';
@@ -322,10 +322,12 @@ function SyncStatus({ room }) {
   useDismiss(ref);
   const st = room.status();
   const live = st.open > 0;
+  // Undecryptable traffic and nobody else here: most likely a mistyped password.
+  const mismatch = st.foreign > 0 && room.peers.size === 0;
   return html`
     <details class="menu sync" ref=${ref}>
-      <summary class=${'chip ' + (live ? 'is-live' : 'is-off')} title="Connection details">
-        <span class="dot"></span>${live ? 'Live' : 'Offline'}
+      <summary class=${'chip ' + (!live ? 'is-off' : mismatch ? 'is-warn' : 'is-live')} title="Connection details">
+        <span class="dot"></span>${!live ? 'Offline' : mismatch ? 'Check password' : 'Live'}
       </summary>
       <div class="menu-panel sync-panel">
         <p>${live
@@ -551,9 +553,22 @@ function Indicators({ room, scenario, scenarios, me, addRef }) {
 
 // ---------------------------------------------------------------- cheat sheet
 
-// The Markdown comes from this repository, so its HTML is trusted.
+// Built-in sheets are files in cheatsheets/. Room sheets are written by
+// teammates and synced like the notes. Both go through the sanitizer, because
+// a room sheet is someone else's Markdown.
+DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+  if (node.tagName !== 'INPUT') return;
+  if (node.getAttribute('type') === 'checkbox') node.setAttribute('disabled', '');
+  else node.remove();
+});
+
 function buildSheet(container, markdown) {
-  container.innerHTML = marked.parse(markdown);
+  container.innerHTML = DOMPurify.sanitize(marked.parse(markdown), {
+    USE_PROFILES: { html: true },
+    FORBID_TAGS: ['style', 'form', 'button', 'textarea', 'select', 'option', 'video', 'audio'],
+    FORBID_ATTR: ['style', 'class'],
+    SANITIZE_NAMED_PROPS: true,
+  });
   container.querySelectorAll('a[href]').forEach((a) => { a.target = '_blank'; a.rel = 'noopener noreferrer'; });
   container.querySelectorAll('table').forEach((table) => {
     const wrap = document.createElement('div');
@@ -583,33 +598,89 @@ function buildSheet(container, markdown) {
   return toc;
 }
 
-function Sheet({ open, expanded, indexes, jump, searchRef, onClose, onExpand }) {
-  const [docs, setDocs] = useState([]);
-  const [file, setFile] = useState(store(localStorage, 'bn.sheet') || '');
+const NEW_SHEET = [
+  '# New cheat sheet',
+  '',
+  '## First section',
+  '',
+  'Each heading becomes an entry in "Jump to section". A fenced block gets a Copy button, and `index=*` in it is replaced by the scenario\'s indexes.',
+  '',
+  '```',
+  'index=* sourcetype=<sourcetype>',
+  '| stats count by host',
+  '```',
+  '',
+].join('\n');
+
+function Sheet({ room, me, open, expanded, indexes, jump, searchRef, onClose, onExpand }) {
+  const doc = room.doc;
+  const sheets = doc.getMap('sheets');
+  const hidden = doc.getMap('hiddenSheets');
+  const [bundled, setBundled] = useState([]);
+  const [selected, setSelected] = useState(store(localStorage, 'bn.sheet') || '');
+  const [editId, setEditId] = useState(null);
   const [toc, setToc] = useState([]);
   const [query, setQuery] = useState('');
   const [useIndexes, setUseIndexes] = useState(true);
   const [matches, setMatches] = useState(null);
   const [error, setError] = useState('');
   const body = useRef();
+  const menuRef = useRef();
+  const importRef = useRef();
+  const files = useRef(new Map());
+  useDismiss(menuRef);
   const clause = indexClause(indexes);
 
-  useEffect(() => {
-    fetch('cheatsheets/index.json').then((r) => r.json()).then((list) => {
-      setDocs(list);
-      setFile((f) => (list.some((d) => d.file === f) ? f : list[0] ? list[0].file : ''));
-    }).catch(() => setError('Could not load the cheat sheet list.'));
-  }, []);
+  const mine = [...sheets.entries()]
+    .map(([id, m]) => ({ key: 'room:' + id, id, m, title: m.get('title') || 'Untitled', at: m.get('at') || 0 }))
+    .sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
+  const builtIn = bundled.filter((d) => !hidden.get(d.file)).map((d) => ({ key: 'file:' + d.file, file: d.file, title: d.title }));
+  const hiddenCount = bundled.length - builtIn.length;
+  const docs = [...mine, ...builtIn];
+  const current = docs.find((d) => d.key === selected) || docs[0] || null;
+  const currentKey = current ? current.key : '';
+  const editing = !!(current && current.id && current.id === editId);
+
+  const select = (key) => { setSelected(key); store(localStorage, 'bn.sheet', key); setQuery(''); };
+  const closeMenu = () => { if (menuRef.current) menuRef.current.open = false; };
+
+  const fileText = (file) => {
+    if (!files.current.has(file)) {
+      files.current.set(file, fetch('cheatsheets/' + file)
+        .then((r) => { if (!r.ok) throw new Error(file); return r.text(); })
+        .catch((err) => { files.current.delete(file); throw err; }));
+    }
+    return files.current.get(file);
+  };
+  const textOf = (d) => (d.id ? Promise.resolve(doc.getText('sheet/' + d.id).toString()) : fileText(d.file));
 
   useEffect(() => {
-    if (!file) return;
+    fetch('cheatsheets/index.json').then((r) => r.json()).then(setBundled)
+      .catch(() => setError('Could not load the built-in cheat sheets.'));
+  }, []);
+
+  // Render the selected sheet. A room sheet re-renders as teammates edit it.
+  useEffect(() => {
     setError('');
-    fetch('cheatsheets/' + file).then((r) => { if (!r.ok) throw new Error(); return r.text(); }).then((md) => {
-      setToc(buildSheet(body.current, md));
-      setQuery('');
-      body.current.scrollTop = 0;
-    }).catch(() => setError('Could not load ' + file));
-  }, [file]);
+    if (!current) { body.current.textContent = ''; setToc([]); return undefined; }
+    let dead = false;
+    let timer = 0;
+    const show = (markdown, keepScroll) => {
+      if (dead) return;
+      const top = body.current.scrollTop;
+      setToc(buildSheet(body.current, markdown));
+      body.current.scrollTop = keepScroll ? top : 0;
+    };
+    if (current.id) {
+      const ytext = doc.getText('sheet/' + current.id);
+      show(ytext.toString());
+      const onChange = () => { clearTimeout(timer); timer = setTimeout(() => show(ytext.toString(), true), 250); };
+      ytext.observe(onChange);
+      return () => { dead = true; clearTimeout(timer); ytext.unobserve(onChange); };
+    }
+    fileText(current.file).then((md) => show(md)).catch(() => { if (!dead) setError('Could not load ' + current.file); });
+    return () => { dead = true; };
+  }, [currentKey]);
 
   // Show each search with the current scenario's indexes filled in.
   useEffect(() => {
@@ -638,11 +709,11 @@ function Sheet({ open, expanded, indexes, jump, searchRef, onClose, onExpand }) 
     if (el) { el.hidden = false; el.scrollIntoView({ block: 'start' }); }
   };
 
-  // A hunt chip was clicked. If the hunt is not in the open document, find the
+  // A hunt chip was clicked. If the hunt is not in the open sheet, find the
   // one that has it and switch; this effect then runs again on the new one.
   const handled = useRef(0);
   useEffect(() => {
-    if (!jump || handled.current === jump.n || !toc.length) return undefined;
+    if (!jump || handled.current === jump.n || !docs.length) return undefined;
     const has = (text) => text.startsWith(jump.key + '.') || text.startsWith(jump.key + ' ');
     const target = toc.find((t) => has(t.text));
     if (target) {
@@ -654,10 +725,10 @@ function Sheet({ open, expanded, indexes, jump, searchRef, onClose, onExpand }) 
     let stale = false;
     (async () => {
       for (const d of docs) {
-        if (d.file === file) continue;
-        const md = await fetch('cheatsheets/' + d.file).then((r) => (r.ok ? r.text() : '')).catch(() => '');
+        if (d.key === currentKey) continue;
+        const md = await textOf(d).catch(() => '');
         if (stale) return;
-        if (md.split('\n').some((line) => /^#{1,3}\s/.test(line) && has(line.replace(/^#+\s+/, '')))) { setFile(d.file); return; }
+        if (md.split('\n').some((line) => /^#{1,3}\s/.test(line) && has(line.replace(/^#+\s+/, '')))) { select(d.key); return; }
       }
       handled.current = jump.n;
       toast(`${jump.key} is not in any cheat sheet`);
@@ -676,19 +747,83 @@ function Sheet({ open, expanded, indexes, jump, searchRef, onClose, onExpand }) 
     if (inline && !inline.closest('pre') && !String(getSelection())) copy(inline.textContent);
   };
 
+  // ---- management
+
+  const create = (title, text, edit) => {
+    const id = uid();
+    doc.transact(() => {
+      const m = new Y.Map();
+      m.set('title', title);
+      m.set('by', me.name);
+      m.set('at', Date.now());
+      sheets.set(id, m);
+      doc.getText('sheet/' + id).insert(0, text);
+    });
+    select('room:' + id);
+    setEditId(edit ? id : null);
+    closeMenu();
+  };
+
+  const copyCurrent = async () => {
+    try { create(current.title, await textOf(current), true); } catch { toast('Could not load that sheet'); }
+  };
+
+  const importFile = async (file) => {
+    if (file.size > 1024 * 1024) { alert('That file is over 1 MB. Room cheat sheets are synced to every teammate, so keep them smaller.'); return; }
+    const text = await file.text();
+    const heading = text.match(/^#\s+(.+)$/m);
+    create((heading ? heading[1] : file.name.replace(/\.[^.]+$/, '')).trim().slice(0, 80) || 'Imported sheet', text, false);
+    toast('Imported for everyone in the room');
+  };
+
+  const remove = () => {
+    closeMenu();
+    if (!confirm(`Delete "${current.title}" for everyone in the room?`)) return;
+    doc.transact(() => {
+      const text = doc.getText('sheet/' + current.id);
+      text.delete(0, text.length);
+      sheets.delete(current.id);
+    });
+    setEditId(null);
+  };
+
+  const save = async () => {
+    closeMenu();
+    const name = current.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'cheat-sheet';
+    try { download(name + '.md', await textOf(current), 'text/markdown'); } catch { toast('Could not load that sheet'); }
+  };
+
   return html`
-    <aside class=${'sheet' + (expanded ? ' expanded' : '')} hidden=${!open} aria-label="Cheat sheet">
+    <aside class=${'sheet' + (expanded ? ' expanded' : '') + (editing ? ' editing' : '')} hidden=${!open} aria-label="Cheat sheet">
       <header class="sheet-head">
-        <select class="sheet-doc" aria-label="Cheat sheet" value=${file} onChange=${(e) => { setFile(e.target.value); store(localStorage, 'bn.sheet', e.target.value); }}>
-          ${docs.map((d) => html`<option value=${d.file}>${d.title}</option>`)}
+        <select class="sheet-doc" aria-label="Cheat sheet document" value=${currentKey} onChange=${(e) => { select(e.target.value); setEditId(null); }}>
+          ${mine.length > 0 && html`<optgroup label="This room">${mine.map((d) => html`<option key=${d.key} value=${d.key}>${d.title}</option>`)}</optgroup>`}
+          ${builtIn.length > 0 && html`<optgroup label="Built in">${builtIn.map((d) => html`<option key=${d.key} value=${d.key}>${d.title}</option>`)}</optgroup>`}
         </select>
-        <select class="sheet-toc" aria-label="Jump to section" value="" onChange=${(e) => { if (e.target.value) { setQuery(''); const id = e.target.value; setTimeout(() => goto(id), 0); } e.target.value = ''; }}>
-          <option value="">Jump to section…</option>
-          ${toc.filter((t) => t.level > 1).map((t) => html`<option value=${t.id}>${t.level === 3 ? ' ' : ''}${t.text}</option>`)}
-        </select>
+        ${current && (editing
+          ? html`<button class="primary" onClick=${() => setEditId(null)}>Done</button>`
+          : current.id
+            ? html`<button title="Edit this sheet for everyone in the room" onClick=${() => setEditId(current.id)}>Edit</button>`
+            : html`<button title="Built-in sheets are read-only. This makes an editable copy shared with the room." onClick=${copyCurrent}>Edit a copy</button>`)}
+        <details class="menu" ref=${menuRef}>
+          <summary class="chip" aria-label="Manage cheat sheets">Manage</summary>
+          <div class="menu-panel menu-list">
+            <button onClick=${() => create('New cheat sheet', NEW_SHEET, true)}>New cheat sheet</button>
+            <button onClick=${() => { importRef.current.click(); closeMenu(); }}>Import a Markdown file…</button>
+            ${current && html`<button onClick=${save}>Download this sheet</button>`}
+            ${current && !current.id && html`<button onClick=${() => { hidden.set(current.file, true); closeMenu(); }}>Hide this built-in sheet</button>`}
+            ${hiddenCount > 0 && html`<button onClick=${() => { doc.transact(() => [...hidden.keys()].forEach((k) => hidden.delete(k))); closeMenu(); }}>Show hidden built-in sheets (${hiddenCount})</button>`}
+            ${current && current.id && html`<hr /><button class="danger" onClick=${remove}>Delete this sheet</button>`}
+          </div>
+        </details>
         <button class="icon" title=${expanded ? 'Dock to the side' : 'Use the full width'} aria-label=${expanded ? 'Dock to the side' : 'Use the full width'} onClick=${onExpand}><${Icon} name=${expanded ? 'dock' : 'expand'} /></button>
         <button class="icon" title="Close (c)" aria-label="Close the cheat sheet" onClick=${onClose}><${Icon} name="close" /></button>
+        <input type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" hidden ref=${importRef} onChange=${(e) => { if (e.target.files[0]) importFile(e.target.files[0]); e.target.value = ''; }} />
         <div class="sheet-tools">
+          <select class="sheet-toc" aria-label="Jump to section" value="" onChange=${(e) => { if (e.target.value) { setQuery(''); const id = e.target.value; setTimeout(() => goto(id), 0); } e.target.value = ''; }}>
+            <option value="">Jump to section…</option>
+            ${toc.filter((t) => t.level > 1).map((t) => html`<option value=${t.id}>${t.level === 3 ? ' ' : ''}${t.text}</option>`)}
+          </select>
           <input type="search" ref=${searchRef} placeholder="Search the sheet ( / )" aria-label="Search the cheat sheet" value=${query} onInput=${(e) => setQuery(e.target.value)} />
           ${matches !== null && html`<span class="count">${matches} section${matches === 1 ? '' : 's'}</span>`}
           ${clause !== 'index=*' && html`<label class="check" title="Replace index=* in every search with this scenario's indexes">
@@ -697,8 +832,17 @@ function Sheet({ open, expanded, indexes, jump, searchRef, onClose, onExpand }) 
           </label>`}
         </div>
       </header>
-      ${error && html`<p class="empty">${error}</p>`}
-      <div class="sheet-body" ref=${body} onClick=${onBodyClick}></div>
+      <div class="sheet-content">
+        ${editing && html`
+          <div class="sheet-editor">
+            <${Field} class="sheet-title" value=${current.title} placeholder="Title" aria-label="Cheat sheet title" onCommit=${(v) => current.m.set('title', v.trim().slice(0, 80) || 'Untitled')} />
+            <${SharedText} key=${current.id} class="mono" ytext=${doc.getText('sheet/' + current.id)} aria-label="Cheat sheet Markdown" placeholder="# Title" />
+            <p class="fine">Markdown, shared with the room as you type; the preview follows. Headings fill “Jump to section”, fenced code blocks get a Copy button.</p>
+          </div>`}
+        ${error && html`<p class="empty sheet-msg">${error}</p>`}
+        ${!current && !error && html`<p class="empty sheet-msg">No cheat sheet to show. Use Manage to write one, import a Markdown file, or bring back the hidden built-in sheets.</p>`}
+        <div class="sheet-body" ref=${body} onClick=${onBodyClick}></div>
+      </div>
     </aside>`;
 }
 
@@ -921,7 +1065,7 @@ function Workspace({ room, session, onLeave }) {
         <div class="col side">
           <${Indicators} room=${room} scenario=${current} scenarios=${scenarios} me=${me} addRef=${iocRef} />
         </div>
-        <${Sheet} open=${sheet.open} expanded=${sheet.expanded} indexes=${current.indexes} jump=${jump} searchRef=${searchRef}
+        <${Sheet} room=${room} me=${me} open=${sheet.open} expanded=${sheet.expanded} indexes=${current.indexes} jump=${jump} searchRef=${searchRef}
           onClose=${() => openSheet({ open: false })} onExpand=${() => openSheet({ expanded: !sheet.expanded })} />
       </div>
 

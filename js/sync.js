@@ -279,17 +279,19 @@ export class Room {
     this.resolveListed = null;
     await this.settled();
 
-    if (this.foreign > 0 && !this.ownSnapshot && !hadLocal && this.peers.size === 0) {
-      this.leave();
-      throw new RoomError('remote-mismatch', 'Wrong password for this room. If nobody on your team created it, the name is taken: pick another.');
-    }
-
-    if (!this.ownSnapshot && !hadLocal) {
-      // Looks like a new room, but teammates may have created it seconds ago:
-      // say hello and give them a moment to send what they have.
+    if (!this.ownSnapshot && !hadLocal && this.foreign === 0) {
+      // Looks like a new room, but teammates may have created it seconds ago,
+      // before any snapshot was stored. Say hello and wait a moment: the right
+      // password gets their notes back, a wrong one gets an answer that does
+      // not decrypt.
       this.heartbeat();
       await new Promise((r) => setTimeout(r, 1500));
       await this.settled();
+    }
+
+    if (this.foreign > 0 && !this.ownSnapshot && !hadLocal && this.peers.size === 0) {
+      this.leave();
+      throw new RoomError('remote-mismatch', 'Wrong password for this room. If nobody on your team created it, the name is taken: pick another.');
     }
 
     this.byeFrame = (await toFrames(this.keys, MSG_BYE, te.encode(JSON.stringify({ id: this.me.id }))))[0];
@@ -307,6 +309,9 @@ export class Room {
     });
     this.timers.push(setInterval(() => this.heartbeat(), HEARTBEAT_MS));
     this.timers.push(setInterval(() => this.maybeSnapshot(), 4000));
+    // Store a first snapshot early, so a brand-new room is findable (and its
+    // password checkable) within a couple of seconds.
+    setTimeout(() => this.maybeSnapshot(), 1500);
     this.heartbeat();
     this.emit('status');
   }
@@ -414,9 +419,15 @@ export class Room {
   async handle(event) {
     let plain;
     try { plain = await unseal(this.keys, unb64(event.content)); } catch {
-      // Same room name, different password.
+      // Same room name, different password. Answer a live message with a
+      // heartbeat (at most every few seconds) so that someone knocking with
+      // the wrong password finds out at once instead of entering an empty room.
       this.foreign++;
       this.emit('status');
+      if (this.started && event.kind === KIND_LIVE && Date.now() - (this.lastKnock || 0) > 5000) {
+        this.lastKnock = Date.now();
+        this.heartbeat();
+      }
       return;
     }
     const type = plain[0];

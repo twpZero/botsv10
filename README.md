@@ -19,10 +19,15 @@ accounts, no build step.
   **SPL** button copies the "where does this value appear, and when" search
   using the scenario's indexes.
 - **Notes.** Free text per scenario, edited by several people at once.
-- **Cheat sheet.** A side panel with a document picker, a section picker and a
+- **Cheat sheets.** A side panel with a sheet picker, a section picker and a
   search box. Every search has a Copy button, and `index=*` is replaced by the
   current scenario's indexes. The `H18`-style chips in a scenario header jump
-  to that hunt, switching document if needed.
+  to that hunt, switching sheet if needed.
+- **Cheat sheet editing.** **Manage** creates a sheet, imports a Markdown file,
+  downloads, hides a built-in sheet or deletes a room sheet. **Edit** opens a
+  Markdown editor with a live preview; teammates see the changes as you type.
+  Built-in sheets are read-only, so **Edit a copy** puts an editable copy in
+  the room.
 - **Shared clock**, a light/dark toggle, Markdown export, and backup/restore
   from the menu.
 
@@ -78,14 +83,17 @@ check the list; replace any relay that fails in `js/config.js`. Take a
 - `js/config.js`: relay list, default scenario tabs with their indexes and
   hunts, clock length, time-box length. Scenario tabs can also be renamed,
   added and removed inside a room.
-- `cheatsheets/`: add a Markdown file and list it in `cheatsheets/index.json`
-  to make it appear in the cheat sheet picker. Headings (`##`, `###`) become
-  the section picker; fenced code blocks get a Copy button.
+- `cheatsheets/`: built-in sheets, public and the same for every room. Add a
+  Markdown file and list it in `cheatsheets/index.json`. Headings (`##`,
+  `###`) become the section picker; fenced code blocks get a Copy button.
+- Sheets written or imported inside a room are stored with the room: encrypted,
+  synced to teammates, and not in the repository. Use them for anything the
+  team does not want public.
 
 ## Development
 
 The site is plain ES modules. `vendor/vendor.js` is a pre-built bundle of Yjs,
-Preact, htm, marked and the noble crypto libraries.
+Preact, htm, marked, DOMPurify and the noble crypto libraries.
 
 ```
 cd tools
