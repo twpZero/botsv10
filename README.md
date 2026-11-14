@@ -7,6 +7,10 @@ accounts, no build step.
 
 ## What is in it
 
+- **Templates.** A new room starts from a template picked on the join screen:
+  Splunk BOTS v10, Splunk BOTS (any version), Jeopardy CTF or Blank. **Menu →
+  Save as template** turns any room's layout into a template, kept in the
+  browser or downloaded as a file that teammates import on the join screen.
 - **Scenario tabs.** One per BOTS scenario plus General, each showing who is
   on it and how many questions are answered.
 - **Questions.** Type `1-15` to create a block. **Take** marks a question as
@@ -85,9 +89,13 @@ check the list; replace any relay that fails in `js/config.js`. Take a
 
 ## Customising
 
-- `js/config.js`: relay list, default scenario tabs with their indexes and
-  hunts, clock length, time-box length. Scenario tabs can also be renamed,
-  added and removed inside a room.
+- `js/config.js`: relay list and the built-in room templates (tabs with their
+  indexes and hunts, clock length, time-box length, whether the Splunk fields
+  show). Tabs can also be renamed, added and removed inside a room.
+- A template saved from a room holds its tabs, and optionally its cheat
+  sheets, question list and notes. It never holds answers, indicators or the
+  time log. To make one built in for everyone, paste the downloaded file's
+  content into `templates` in `js/config.js`.
 - `cheatsheets/`: built-in sheets, public and the same for every room. Add a
   Markdown file and list it in `cheatsheets/index.json`. Headings (`##`,
   `###`) become the section picker; fenced code blocks get a Copy button.

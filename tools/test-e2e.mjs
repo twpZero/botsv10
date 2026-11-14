@@ -366,6 +366,80 @@ await step('the Markdown export contains answers, indicators and notes', async (
   assert.match(md, /second line from Alice/);
 });
 
+await step('a new room starts from the chosen template, and a room can be saved as one', async () => {
+  const t = await open('T', url.replace('#e2e-room', '#e2e-ctf'));
+  await t.getByLabel('Template').selectOption({ label: 'Jeopardy CTF' });
+  await join(t, 'Tess', 'pw');
+  await t.waitForSelector('.app');
+  assert.deepEqual(await t.locator('.tab-name').allInnerTexts(), ['General', 'Web', 'Pwn', 'Reversing', 'Crypto', 'Forensics', 'OSINT', 'Misc']);
+
+  // A non-Splunk template: no index field, no SPL button, no built-in sheet.
+  assert.equal(await t.locator('.scenario-head .s-field').count(), 0);
+  await t.getByLabel('Add indicators').fill('10.9.8.7');
+  await t.getByLabel('Add indicators').press('Enter');
+  await t.waitForSelector('.ioc-row');
+  assert.equal(await t.locator('.ioc-row').getByRole('button', { name: 'SPL' }).count(), 0);
+  await t.getByRole('button', { name: 'Cheat sheet', exact: true }).click();
+  await t.waitForSelector('.sheet:not([hidden])');
+  assert.equal(await t.locator('.sheet-doc option').count(), 0);
+
+  // Give the room a sheet, questions and an answer, then save it as a template.
+  await t.locator('.sheet summary', { hasText: 'Manage' }).click();
+  await t.locator('.sheet .menu-list').getByRole('button', { name: 'New cheat sheet' }).click();
+  await t.getByLabel('Cheat sheet title').fill('Web tricks');
+  await t.getByLabel('Cheat sheet title').press('Enter');
+  await t.locator('.sheet-head').getByRole('button', { name: 'Done' }).click();
+  await t.getByRole('button', { name: 'Close the cheat sheet' }).click();
+  await tab(t, 'Web').click();
+  await t.getByLabel('Add questions').fill('1-2');
+  await t.getByLabel('Add questions').press('Enter');
+  await t.getByLabel('Question 1', { exact: true }).fill('Login bypass');
+  await t.getByLabel('Answer 1', { exact: true }).fill('flag{secret}');
+  await t.getByLabel('Answer 1', { exact: true }).press('Enter');
+  await t.locator('summary', { hasText: 'Menu' }).click();
+  await t.getByRole('button', { name: 'Save as template…' }).click();
+  const dialog = t.locator('dialog.save-template');
+  await dialog.getByLabel('Template name').fill('Team CTF');
+  await dialog.getByLabel(/^Question list/).check();
+  const [dl] = await Promise.all([t.waitForEvent('download'), dialog.getByRole('button', { name: 'Download as a file' }).click()]);
+  const file = await readFile(await dl.path(), 'utf8');
+  const saved = JSON.parse(file);
+  assert.equal(saved.name, 'Team CTF');
+  assert.equal(saved.splunk, false);
+  assert.deepEqual(saved.tabs.map((x) => x.name), ['General', 'Web', 'Pwn', 'Reversing', 'Crypto', 'Forensics', 'OSINT', 'Misc']);
+  assert.deepEqual(saved.tabs[1].questions, [{ n: 1, title: 'Login bypass' }, { n: 2, title: '' }]);
+  assert.deepEqual(saved.sheets.map((x) => x.title), ['Web tricks']);
+  assert.ok(!file.includes('flag{secret}') && !file.includes('10.9.8.7'), 'answers and indicators must stay out of a template');
+  await dialog.getByRole('button', { name: 'Save in this browser' }).click();
+  await t.waitForSelector('dialog.save-template', { state: 'detached' });
+
+  // Start another room from the saved template.
+  await t.locator('summary', { hasText: 'Menu' }).click();
+  await t.getByRole('button', { name: 'Leave room', exact: true }).click();
+  await t.waitForSelector('.join-card');
+  await t.getByLabel('Room', { exact: true }).fill('e2e-ctf-two');
+  await t.getByLabel('Template').selectOption({ label: 'Team CTF' });
+  await join(t, 'Tess', 'pw');
+  await t.waitForSelector('.app');
+  await tab(t, 'Web').click();
+  await t.waitForFunction(() => document.querySelectorAll('.q-row').length === 2);
+  assert.equal(await t.getByLabel('Question 1', { exact: true }).inputValue(), 'Login bypass');
+  assert.equal(await t.getByLabel('Answer 1', { exact: true }).inputValue(), '');
+  assert.equal(await t.locator('.ioc-row').count(), 0);
+  await t.getByRole('button', { name: 'Cheat sheet', exact: true }).click();
+  await t.waitForFunction(() => [...document.querySelectorAll('.sheet-doc option')].map((o) => o.textContent).join() === 'Web tricks');
+
+  // A teammate imports the file on the join screen.
+  const u = await open('U', url.replace('#e2e-room', '#e2e-ctf-three'));
+  await u.locator('.join-card input[type="file"]').setInputFiles({ name: 'team-ctf.template.json', mimeType: 'application/json', buffer: Buffer.from(file) });
+  await u.waitForFunction(() => document.querySelector('select[aria-label="Template"]').selectedOptions[0].textContent === 'Team CTF');
+  await join(u, 'Uma', 'pw');
+  await u.waitForSelector('.app');
+  assert.equal(await u.locator('.tab-name').count(), 8);
+  assert.equal(await u.locator('.tab-name').nth(1).innerText(), 'Web');
+  for (const page of [t, u]) await page.context().close();
+});
+
 await step('someone who joins after everyone left still gets the notes', async () => {
   await a.locator('summary', { hasText: 'Menu' }).click();
   await a.getByRole('button', { name: 'Leave room', exact: true }).click();
@@ -374,12 +448,15 @@ await step('someone who joins after everyone left still gets the notes', async (
   await b.getByRole('button', { name: 'Leave room', exact: true }).click();
   await b.waitForTimeout(1500);
   const d = await open('D');
+  // The room exists, so the template picked here must be ignored.
+  await d.getByLabel('Template').selectOption({ label: 'Blank' });
   await join(d, 'Dana');
   await d.waitForSelector('.app');
   await tab(d, '4 Zero Chill').click();
   await d.waitForFunction(() => document.querySelectorAll('.q-row').length === 4);
   assert.match(await notes(d).inputValue(), /alpha one two three\./);
   assert.equal(await d.locator('.people .alone').count(), 1);
+  assert.equal(await d.locator('.tab-name').count(), 8);
 });
 
 await browser.close();

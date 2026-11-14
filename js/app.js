@@ -2,6 +2,7 @@ import { Y, h, render, useState, useEffect, useLayoutEffect, useRef, htm, marked
 import { CONFIG } from './config.js';
 import { Room, deriveKeys, keysFromBits, normRoom, forgetRoom, b64, unb64 } from './sync.js';
 import { TYPES, parseIndicators, parseQuestions, indexClause, pivotSpl } from './indicators.js';
+import { builtInTemplates, savedTemplates, saveTemplate, removeTemplate, normalizeTemplate, applyTemplate, templateFromRoom } from './templates.js';
 
 const html = htm.bind(h);
 const uid = () => Math.random().toString(36).slice(2, 12);
@@ -274,8 +275,26 @@ function Join({ initialRoom, busy, error, onJoin, onForget }) {
   const [name, setName] = useState(store(localStorage, 'bn.name') || '');
   const [room, setRoom] = useState(initialRoom || store(localStorage, 'bn.room') || '');
   const [password, setPassword] = useState('');
+  const [templates, setTemplates] = useState(() => [...builtInTemplates(), ...savedTemplates()]);
+  const [templateId, setTemplateId] = useState(store(localStorage, 'bn.template') || '');
+  const template = templates.find((t) => t.id === templateId) || templates[0];
+  const templateFile = useRef();
   const secure = !!(window.crypto && crypto.subtle);
   const form = useRef();
+  const pick = (id) => { setTemplateId(id); store(localStorage, 'bn.template', id); };
+  const importTemplate = async (file) => {
+    let t;
+    try {
+      const raw = JSON.parse(await file.text());
+      if (raw.app !== 'bots-notepad-template') throw new Error();
+      t = normalizeTemplate(raw);
+    } catch { alert('That file is not a room template.'); return; }
+    // Kept for next time when the browser allows it, used now either way.
+    const kept = saveTemplate(t);
+    setTemplates(kept ? [...builtInTemplates(), ...savedTemplates()] : [...templates.filter((x) => x.id !== t.id), t]);
+    pick(t.id);
+    toast(kept ? 'Template saved in this browser' : 'Template loaded for this join');
+  };
   useEffect(() => {
     const empty = [...form.current.querySelectorAll('input')].find((el) => !el.value);
     if (empty) empty.focus();
@@ -283,14 +302,14 @@ function Join({ initialRoom, busy, error, onJoin, onForget }) {
   const submit = (e) => {
     e.preventDefault();
     if (!name.trim() || !room.trim() || busy) return;
-    onJoin({ name: name.trim(), room, password });
+    onJoin({ name: name.trim(), room, password, template });
   };
   return html`
     <main class="join">
       <${ThemeToggle} />
       <form class="join-card" ref=${form} onSubmit=${submit}>
         <h1>${CONFIG.appName}</h1>
-        <p class="lede">A shared notepad for a Boss of the SOC team: questions, answers, indicators and notes, in sync for everyone in the room.</p>
+        <p class="lede">A shared notepad for a CTF team: questions, answers, indicators and notes, in sync for everyone in the room.</p>
         <label>Your name
           <input value=${name} onInput=${(e) => setName(e.target.value)} placeholder="Alice" maxlength="24" autocomplete="nickname" required />
         </label>
@@ -300,6 +319,18 @@ function Join({ initialRoom, busy, error, onJoin, onForget }) {
         <label><span>Password <span class="optional">optional</span></span>
           <input type="password" value=${password} onInput=${(e) => setPassword(e.target.value)} placeholder="Leave empty for an open room" autocomplete="off" />
         </label>
+        <label><span>Template <span class="optional">for a new room</span></span>
+          <select aria-label="Template" value=${template.id} onChange=${(e) => pick(e.target.value)}>
+            <optgroup label="Built in">${templates.filter((t) => t.builtIn).map((t) => html`<option key=${t.id} value=${t.id}>${t.name}</option>`)}</optgroup>
+            ${templates.some((t) => !t.builtIn) && html`<optgroup label="Saved in this browser">${templates.filter((t) => !t.builtIn).map((t) => html`<option key=${t.id} value=${t.id}>${t.name}</option>`)}</optgroup>`}
+          </select>
+        </label>
+        <p class="fine template-line">
+          ${template.description ? template.description + ' ' : ''}${template.tabs.length} tab${template.tabs.length === 1 ? '' : 's'}${template.sheets.length ? `, ${template.sheets.length} cheat sheet${template.sheets.length === 1 ? '' : 's'}` : ''}. An existing room keeps its own layout.
+          ${' '}<button type="button" class="link" onClick=${() => templateFile.current.click()}>Import a template file</button>
+          ${!template.builtIn && html`${' · '}<button type="button" class="link" onClick=${() => { removeTemplate(template.id); setTemplates(templates.filter((t) => t.id !== template.id)); pick(''); }}>Remove this one</button>`}
+        </p>
+        <input type="file" accept="application/json,.json" hidden ref=${templateFile} onChange=${(e) => { if (e.target.files[0]) importTemplate(e.target.files[0]); e.target.value = ''; }} />
         ${error && html`<div class="join-error" role="alert">
           <p>${error.message}</p>
           ${error.code === 'local-mismatch' && html`<button type="button" class="link" onClick=${() => onForget(room)}>Delete the copy saved in this browser</button>`}
@@ -352,7 +383,7 @@ function GameTimer({ meta }) {
   useDismiss(ref);
   const end = meta.get('timerEnd') || 0;
   useTick(1000, !!end);
-  const [minutes, setMinutes] = useState(CONFIG.gameMinutes);
+  const [minutes, setMinutes] = useState(meta.get('clockMinutes') || CONFIG.gameMinutes);
   const left = end - Date.now();
   const cls = !end ? '' : left <= 0 ? 'is-over' : left < 15 * 60000 ? 'is-late' : 'is-running';
   return html`
@@ -469,7 +500,7 @@ function TimeLog({ room, scenarios, onClose }) {
   const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
 
   return html`
-    <dialog class="timelog" ref=${ref} aria-label="Time log" onClose=${onClose} onClick=${(e) => { if (e.target === ref.current) ref.current.close(); }}>
+    <dialog class="modal timelog" ref=${ref} aria-label="Time log" onClose=${onClose} onClick=${(e) => { if (e.target === ref.current) ref.current.close(); }}>
       <header class="tl-head">
         <h2>Time log</h2>
         <span class="count">${sessions.length ? `${clock(total(sessions))} over ${new Set(sessions.map((e) => e.q)).size} questions` : ''}</span>
@@ -513,7 +544,7 @@ function TimeLog({ room, scenarios, onClose }) {
     </dialog>`;
 }
 
-function Questions({ room, scenario, me, addRef, onShowLog }) {
+function Questions({ room, scenario, me, addRef, timebox, onShowLog }) {
   const questions = room.doc.getMap('questions');
   const rows = [];
   for (const [id, q] of questions) if (q.get('s') === scenario.id) rows.push({ id, q, n: q.get('n') || 0 });
@@ -581,7 +612,7 @@ function Questions({ room, scenario, me, addRef, onShowLog }) {
           const status = q.get('status') || 'open';
           const owner = q.get('owner');
           const elapsed = status === 'working' && q.get('started') ? Date.now() - q.get('started') : 0;
-          const over = elapsed > CONFIG.timeboxMinutes * 60000;
+          const over = elapsed > timebox * 60000;
           const total = spent.get(id);
           return html`
             <div key=${id} data-q=${id} class=${`q-row is-${status}${flash === id ? ' flash' : ''}`}>
@@ -592,7 +623,7 @@ function Questions({ room, scenario, me, addRef, onShowLog }) {
               <span class="q-who">
                 ${owner ? html`<${Avatar} name=${owner} title=${`${owner}${status === 'working' ? ' is on it' : ''}`} />` : null}
                 ${status === 'working'
-                  ? html`<span class=${'q-time' + (over ? ' over' : '')} title=${(over ? `Over the ${CONFIG.timeboxMinutes}-minute time-box: take the hint, swap or move on. ` : 'Time on this question. ') + (total && total.ms > elapsed + 1500 ? `Total so far: ${clock(total.ms)}.` : '')}>${clock(elapsed)}</span>`
+                  ? html`<span class=${'q-time' + (over ? ' over' : '')} title=${(over ? `Over the ${timebox}-minute time-box: take the hint, swap or move on. ` : 'Time on this question. ') + (total && total.ms > elapsed + 1500 ? `Total so far: ${clock(total.ms)}.` : '')}>${clock(elapsed)}</span>`
                   : total && total.ms
                     ? html`<span class="q-time spent" title=${total.estimated ? 'Estimated time spent (see the time log)' : 'Time spent on this question'}>${total.estimated ? '≈' : ''}${clock(total.ms)}</span>`
                     : null}
@@ -614,7 +645,7 @@ function Questions({ room, scenario, me, addRef, onShowLog }) {
 
 // ---------------------------------------------------------------- indicators
 
-function Indicators({ room, scenario, scenarios, me, addRef }) {
+function Indicators({ room, scenario, scenarios, me, addRef, splunk }) {
   const iocs = room.doc.getMap('iocs');
   const [filter, setFilter] = useState('');
   const [scope, setScope] = useState('all');
@@ -662,7 +693,7 @@ function Indicators({ room, scenario, scenarios, me, addRef }) {
         <span class="count">${all.length || ''}</span>
         <span class="seg" role="group" aria-label="Indicator scope">
           <button class=${scope === 'all' ? 'on' : ''} onClick=${() => setScope('all')}>All</button>
-          <button class=${scope === 'here' ? 'on' : ''} onClick=${() => setScope('here')}>This scenario</button>
+          <button class=${scope === 'here' ? 'on' : ''} onClick=${() => setScope('here')}>This tab</button>
         </span>
         <input class="quick filter" type="search" placeholder="Filter" aria-label="Filter indicators" value=${filter} onInput=${(e) => setFilter(e.target.value)} />
       </header>
@@ -688,7 +719,7 @@ function Indicators({ room, scenario, scenarios, me, addRef }) {
                   ${TYPES.map((t) => html`<option value=${t}>${t}</option>`)}
                 </select>
                 <button class="ioc-value mono" title="Copy" onClick=${() => copy(value)}>${value}</button>
-                <button class="mini" title="Copy a search that shows where this value appears and when" onClick=${() => copy(pivotSpl(value, (tagged || scenario).indexes), 'Pivot search copied')}>SPL</button>
+                ${splunk && html`<button class="mini" title="Copy a search that shows where this value appears and when" onClick=${() => copy(pivotSpl(value, (tagged || scenario).indexes), 'Pivot search copied')}>SPL</button>`}
                 <button class="icon danger" title="Delete indicator" aria-label="Delete indicator" onClick=${() => iocs.delete(id)}><${Icon} name="close" /></button>
               </div>
               <div class="ioc-sub">
@@ -1035,6 +1066,48 @@ function exportMarkdown(room, scenarios) {
   return out.join('\n');
 }
 
+// ---------------------------------------------------------------- templates
+
+function SaveTemplate({ room, onClose }) {
+  const ref = useRef();
+  useEffect(() => { if (!ref.current.open) ref.current.showModal(); }, []);
+  const doc = room.doc;
+  const [name, setName] = useState(room.keys.room);
+  const [opts, setOpts] = useState({ sheets: true, questions: false, notes: false });
+  const build = () => templateFromRoom(doc, { name: name.trim() || room.keys.room, ...opts });
+  const option = (key, label) => html`<label class="check">
+    <input type="checkbox" checked=${opts[key]} onChange=${(e) => setOpts({ ...opts, [key]: e.target.checked })} />${label}
+  </label>`;
+  return html`
+    <dialog class="modal save-template" ref=${ref} aria-label="Save as template" onClose=${onClose} onClick=${(e) => { if (e.target === ref.current) ref.current.close(); }}>
+      <header class="tl-head">
+        <h2>Save as template</h2>
+        <span class="spacer"></span>
+        <button class="icon" aria-label="Close" onClick=${() => ref.current.close()}><${Icon} name="close" /></button>
+      </header>
+      <div class="tl-body">
+        <p>Start future rooms with this room's layout. The tabs, their indexes and cheat sheet links, the clock and time-box lengths and the hidden built-in sheets are always included. Answers, indicators and the time log never are.</p>
+        <label class="stack">Template name
+          <input value=${name} maxlength="60" onInput=${(e) => setName(e.target.value)} />
+        </label>
+        ${option('sheets', `Room cheat sheets (${doc.getMap('sheets').size})`)}
+        ${option('questions', `Question list: numbers and titles, without answers (${doc.getMap('questions').size})`)}
+        ${option('notes', 'Notes of every tab')}
+        <div class="row">
+          <button class="primary" onClick=${() => {
+            if (saveTemplate(build())) { toast('Template saved in this browser'); ref.current.close(); }
+            else alert('This browser could not store the template (it may be too large). Download it as a file instead.');
+          }}>Save in this browser</button>
+          <button onClick=${() => {
+            const t = build();
+            download((t.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'room') + '.template.json', JSON.stringify(t, null, 2), 'application/json');
+          }}>Download as a file</button>
+        </div>
+        <p class="fine">A saved template appears under Template on the join screen of this browser. Teammates can import the file there.</p>
+      </div>
+    </dialog>`;
+}
+
 // ---------------------------------------------------------------- workspace
 
 function Workspace({ room, session, onLeave }) {
@@ -1043,11 +1116,12 @@ function Workspace({ room, session, onLeave }) {
   const me = room.me;
   const scenMap = doc.getMap('scenarios');
   const meta = doc.getMap('meta');
-  const [active, setActive] = useState(store(sessionStorage, 'bn.tab') || CONFIG.scenarios[0].id);
+  const [active, setActive] = useState(store(sessionStorage, 'bn.tab') || '');
   const [sheet, setSheet] = useState({ open: store(localStorage, 'bn.sheetOpen') === '1', expanded: false });
   const [jump, setJump] = useState(null);
   const [editing, setEditing] = useState(false);
   const [showLog, setShowLog] = useState(false);
+  const [showSave, setShowSave] = useState(false);
   const menuRef = useRef();
   const fileRef = useRef();
   const qRef = useRef();
@@ -1056,21 +1130,9 @@ function Workspace({ room, session, onLeave }) {
   const searchRef = useRef();
   useDismiss(menuRef);
 
-  // A brand-new room starts with the scenario tabs from config.js. The ids are
-  // fixed, so two people creating the room at once end up with one set.
-  useEffect(() => {
-    if (scenMap.size) return;
-    doc.transact(() => {
-      CONFIG.scenarios.forEach((s, i) => {
-        const m = new Y.Map();
-        m.set('name', s.name);
-        m.set('indexes', s.indexes);
-        m.set('hunts', s.hunts);
-        m.set('order', i);
-        scenMap.set(s.id, m);
-      });
-    });
-  }, []);
+  // Set by the room's template; rooms older than templates are Splunk rooms.
+  const splunk = meta.get('splunk') !== false;
+  const timebox = meta.get('timeboxMinutes') || CONFIG.timeboxMinutes;
 
   const scenarios = [...scenMap.entries()]
     .map(([id, m]) => ({ id, m, name: m.get('name') || 'Untitled', indexes: m.get('indexes') || '', hunts: m.get('hunts') || '', order: m.get('order') || 0 }))
@@ -1174,6 +1236,7 @@ function Workspace({ room, session, onLeave }) {
           <div class="menu-panel menu-list">
             <button onClick=${() => { copy(invite, 'Invite link copied'); closeMenu(); }}>Copy invite link</button>
             <button onClick=${() => { setShowLog(true); closeMenu(); }}>Time log</button>
+            <button onClick=${() => { setShowSave(true); closeMenu(); }}>Save as template…</button>
             <button onClick=${() => { download(`bots-notes-${room.keys.room}-${stamp}.md`, exportMarkdown(room, scenarios), 'text/markdown'); closeMenu(); }}>Export notes as Markdown</button>
             <button onClick=${() => { download(`bots-notes-${room.keys.room}-${stamp}.backup.json`, JSON.stringify({ app: 'bots-notepad', room: room.keys.room, exported: new Date().toISOString(), update: b64(Y.encodeStateAsUpdate(doc)) }), 'application/json'); closeMenu(); }}>Download backup</button>
             <button onClick=${() => { fileRef.current.click(); closeMenu(); }}>Restore backup…</button>
@@ -1210,28 +1273,31 @@ function Workspace({ room, session, onLeave }) {
                 <button class="mini" onClick=${() => setEditing(false)}>Done</button>`
               : html`
                 <h1>${current.name}</h1>
-                <label class="s-field">Indexes <${Field} class="mono" value=${current.indexes} placeholder="main, bots10" title="Used by the SPL buttons and the cheat sheet" onCommit=${(v) => current.m.set('indexes', v)} /></label>
+                ${splunk && html`<label class="s-field">Indexes <${Field} class="mono" value=${current.indexes} placeholder="main, bots10" title="Used by the SPL buttons and the cheat sheet" onCommit=${(v) => current.m.set('indexes', v)} /></label>`}
                 <span class="hunts">
                   ${hunts.map((k) => html`<button key=${k} class="hunt" title=${`Open ${k} in the cheat sheet`} onClick=${() => { openSheet({ open: true }); setJump({ key: k, n: Date.now() }); }}>${k}</button>`)}
                 </span>
                 <button class="mini" onClick=${() => setEditing(true)}>Edit</button>`}
           </div>
-          <${Questions} key=${'q' + current.id} room=${room} scenario=${current} me=${me} addRef=${qRef} onShowLog=${() => setShowLog(true)} />
+          <${Questions} key=${'q' + current.id} room=${room} scenario=${current} me=${me} addRef=${qRef} timebox=${timebox} onShowLog=${() => setShowLog(true)} />
           <section class="panel notes">
             <header class="panel-head"><h2>Notes</h2><span class="count">shared, saved as you type</span></header>
             <${SharedText} key=${'n' + current.id} inputRef=${notesRef} class="mono" ytext=${doc.getText('notes/' + current.id)}
               aria-label=${`Notes for ${current.name}`}
-              placeholder=${current.id === 'general' ? 'Sourcetype list from H0, time range of the data, who is on which scenario…' : 'Working searches, hosts and accounts involved, dead ends…'} />
+              placeholder=${current.id === 'general'
+                ? (splunk ? 'Sourcetype list from H0, time range of the data, who is on which scenario…' : 'Rules, flag format, infrastructure, who is on what…')
+                : (splunk ? 'Working searches, hosts and accounts involved, dead ends…' : 'What was tried, what worked, dead ends…')} />
           </section>
         </div>
         <div class="col side">
-          <${Indicators} room=${room} scenario=${current} scenarios=${scenarios} me=${me} addRef=${iocRef} />
+          <${Indicators} room=${room} scenario=${current} scenarios=${scenarios} me=${me} addRef=${iocRef} splunk=${splunk} />
         </div>
         <${Sheet} room=${room} me=${me} open=${sheet.open} expanded=${sheet.expanded} indexes=${current.indexes} jump=${jump} searchRef=${searchRef}
           onClose=${() => openSheet({ open: false })} onExpand=${() => openSheet({ expanded: !sheet.expanded })} />
       </div>
 
       ${showLog && html`<${TimeLog} room=${room} scenarios=${scenarios} onClose=${() => setShowLog(false)} />`}
+      ${showSave && html`<${SaveTemplate} room=${room} onClose=${() => setShowSave(false)} />`}
 
       <footer class="foot">
         <span><kbd>c</kbd> cheat sheet</span><span><kbd>/</kbd> search it</span><span><kbd>q</kbd> add question</span>
@@ -1255,7 +1321,7 @@ function App() {
   const roomRef = useRef(null);
   const hashRoom = decodeURIComponent(location.hash.slice(1));
 
-  const enter = async (info, keys) => {
+  const enter = async (info, keys, template) => {
     setBusy(true);
     setError(null);
     try {
@@ -1265,6 +1331,12 @@ function App() {
         relays: relayList(),
       });
       await r.start();
+      // Nothing came back from this browser, the relays or teammates: the room
+      // is new, so lay it out from the chosen template.
+      if (r.doc.getMap('scenarios').size === 0) {
+        const bundled = await fetch('cheatsheets/index.json').then((x) => x.json()).then((list) => list.map((d) => d.file)).catch(() => []);
+        if (r.doc.getMap('scenarios').size === 0) applyTemplate(r.doc, template || builtInTemplates()[0], { by: info.name, bundled });
+      }
       roomRef.current = r;
       store(sessionStorage, 'bn.session', JSON.stringify({ ...info, room: keys.room, bits: b64(keys.bits) }));
       store(localStorage, 'bn.name', info.name);
@@ -1281,10 +1353,10 @@ function App() {
     }
   };
 
-  const join = async ({ name, room: roomName, password }) => {
+  const join = async ({ name, room: roomName, password, template }) => {
     setBusy(true);
     const keys = await deriveKeys(roomName, password);
-    await enter({ id: uid(), name, locked: !!password }, keys);
+    await enter({ id: uid(), name, locked: !!password }, keys, template);
   };
 
   // A reload keeps the tab in its room without asking for the password again.
