@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
 import { serve } from './serve.mjs';
 import { mockRelay } from './mock-relay.mjs';
+import * as Y from 'yjs';
 
 let chromium;
 try { ({ chromium } = createRequire(import.meta.url)('playwright')); } catch { ({ chromium } = createRequire('/')('playwright')); }
@@ -79,6 +80,62 @@ await step('taking a question shows the owner and a running timer to the team', 
   await a.locator('.q-row').nth(1).getByRole('button', { name: 'Done' }).click();
   await b.waitForSelector('.q-row:nth-child(2).is-done');
   await b.waitForFunction(() => document.querySelector('.tab.on .tab-count').textContent === '1/3');
+});
+
+await step('time on questions is logged per person and kept after they are answered', async () => {
+  // Question 2 was taken and finished by Alice in the previous step.
+  await b.waitForSelector('.q-row:nth-child(2) .q-time.spent');
+  // Bob works on question 3 and gets stuck; Alice picks it up, then releases it.
+  await b.locator('.q-row').nth(2).getByRole('button', { name: 'Take' }).click();
+  await b.waitForTimeout(1200);
+  await b.getByLabel('Status of question 3').selectOption('stuck');
+  await a.waitForSelector('.q-row:nth-child(3).is-stuck');
+  await a.locator('.q-row').nth(2).getByRole('button', { name: 'Take' }).click();
+  await a.waitForTimeout(1200);
+  await a.getByLabel('Status of question 3').selectOption('open');
+  await a.waitForFunction(() => /^0:0[2-9]$/.test((document.querySelector('.q-row:nth-child(3) .q-time.spent') || {}).textContent || ''));
+
+  await b.locator('summary', { hasText: 'Menu' }).click();
+  await b.getByRole('button', { name: 'Time log' }).click();
+  await b.waitForSelector('dialog.timelog[open]');
+  // The dialog is live: wait until Alice's release has arrived here.
+  await b.waitForFunction(() => { const rows = document.querySelectorAll('.tl-table tbody tr'); return rows.length === 3 && rows[2].cells[6].textContent.trim() === 'Released'; });
+  const rows = await b.locator('.tl-table tbody tr').evaluateAll((trs) => trs.map((tr) => [...tr.cells].map((td) => td.textContent.trim())));
+  assert.deepEqual(rows.map((r) => [r[1], r[2], r[4], r[6]]), [
+    ['4 Zero Chill', '2', 'Alice', 'Done'], ['4 Zero Chill', '3', 'Bob', 'Stuck'], ['4 Zero Chill', '3', 'Alice', 'Released'],
+  ]);
+  assert.ok(rows.every((r) => /^0:0\d$/.test(r[5])), JSON.stringify(rows));
+  assert.deepEqual(await b.locator('.tl-groups').first().locator('.tl-chip span:nth-child(2)').allInnerTexts(), ['Alice', 'Bob']);
+  const [dl] = await Promise.all([b.waitForEvent('download'), b.getByRole('button', { name: 'Download CSV' }).click()]);
+  const csv = (await readFile(await dl.path(), 'utf8')).trim().split('\r\n');
+  assert.equal(csv[0], 'scenario,question,title,who,started,ended,seconds,result,estimated');
+  assert.match(csv[2], /^"4 Zero Chill","3","","Bob","20\d\d-[^"]+Z","20\d\d-[^"]+Z","[1-9]","Stuck",""$/);
+  await b.keyboard.press('Escape');
+  await b.waitForSelector('dialog.timelog', { state: 'detached' });
+});
+
+await step('questions answered before the log existed get an estimate, marked as such', async () => {
+  // An old room: answered questions only kept the time they were taken.
+  const old = new Y.Doc();
+  const t0 = Date.now() - 3 * 3600000;
+  [[1, 0, 'done'], [2, 12, 'done'], [3, 20, 'done']].forEach(([n, minute, status]) => {
+    const q = new Y.Map();
+    old.getMap('questions').set('legacy' + n, q);
+    q.set('s', 's5'); q.set('n', n); q.set('title', 'Old question ' + n); q.set('answer', 'x');
+    q.set('status', status); q.set('owner', 'Alice'); q.set('started', t0 + minute * 60000);
+  });
+  const backup = JSON.stringify({ app: 'bots-notepad', update: Buffer.from(Y.encodeStateAsUpdate(old)).toString('base64') });
+  await a.locator('input[type="file"][accept*="json"]').setInputFiles({ name: 'old.backup.json', mimeType: 'application/json', buffer: Buffer.from(backup) });
+  await tab(a, '5 Threat Intel').click();
+  await a.waitForFunction(() => document.querySelectorAll('.q-row').length === 3);
+  assert.deepEqual(await a.locator('.q-row').evaluateAll((els) => els.map((el) => (el.querySelector('.q-time') || {}).textContent || '')), ['≈12:00', '≈8:00', '']);
+  await a.locator('.questions .panel-head').getByRole('button', { name: /tracked$/ }).click();
+  await a.waitForSelector('dialog.timelog[open]');
+  const times = await a.locator('.tl-table tbody tr').evaluateAll((trs) => trs.map((tr) => tr.cells[5].textContent.trim()));
+  assert.deepEqual(times.slice(0, 3), ['≈12:00', '≈8:00', '—']);
+  assert.match(await a.locator('dialog.timelog .fine').innerText(), /estimate/);
+  await a.getByRole('button', { name: 'Close the time log' }).click();
+  await tab(a, '4 Zero Chill').click();
 });
 
 await step('indicators are typed, de-duplicated and shared', async () => {

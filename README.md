@@ -13,6 +13,11 @@ accounts, no build step.
   yours and starts a timer that turns red after 10 minutes (take the hint, swap
   or move on). Answers have a copy button, because each one is usually the
   search term for the next question.
+- **Time log.** Every stretch of work on a question is kept: who, when, how
+  long, and whether it ended Done, Stuck or released. Each row shows the total
+  after it is answered; **Menu → Time log** lists everything with totals per
+  person and per scenario, and exports CSV. Questions answered before the log
+  existed only kept a start time, so their time is an estimate marked `≈`.
 - **Indicators.** One list for the whole team. Paste IPs, hosts, users, hashes,
   domains or access keys, several lines at once; the type is detected,
   defanged values (`evil[.]example`) are cleaned, duplicates are refused. The

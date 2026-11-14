@@ -377,7 +377,143 @@ function GameTimer({ meta }) {
 
 const STATUS = { open: 'Open', working: 'Working', done: 'Done', stuck: 'Stuck' };
 
-function Questions({ room, scenario, me, addRef }) {
+// ---------------------------------------------------------------- time log
+
+// Every stretch of work on a question is kept: who, from when to when, and how
+// it ended. Entries are appended when a question stops being "working".
+function logSession(doc, id, q, to) {
+  const start = q.get('started');
+  if (q.get('status') !== 'working' || !start) return;
+  doc.getArray('timelog').push([{ q: id, s: q.get('s'), n: q.get('n'), who: q.get('owner') || '', start, end: Date.now(), to }]);
+}
+
+const ESTIMATE_LIMIT = 90 * 60000;
+
+// Finished stretches, plus the ones still running. Questions answered before
+// the log existed only kept their start time: for those the time is estimated
+// as "until the same person took their next question", when that is plausible.
+function timeSessions(doc) {
+  const unique = new Map();
+  for (const e of doc.getArray('timelog').toArray()) {
+    // Two people can close the same stretch at once; keep one.
+    const key = `${e.q}|${e.who}|${e.start}`;
+    const old = unique.get(key);
+    if (!old || e.end < old.end) unique.set(key, e);
+  }
+  const out = [...unique.values()].map((e) => ({ ...e, ms: Math.max(0, e.end - e.start) }));
+  const logged = new Set(out.map((e) => e.q));
+  for (const [id, q] of doc.getMap('questions')) {
+    const start = q.get('started');
+    if (!start) continue;
+    const base = { q: id, s: q.get('s'), n: q.get('n'), who: q.get('owner') || '', start, end: null };
+    if (q.get('status') === 'working') out.push({ ...base, to: 'working', ms: Math.max(0, Date.now() - start), running: true });
+    else if (!logged.has(id)) out.push({ ...base, to: q.get('status') || 'open', ms: null, legacy: true });
+  }
+  out.sort((a, b) => a.start - b.start);
+  out.forEach((e, i) => {
+    if (!e.legacy) return;
+    const next = out.slice(i + 1).find((x) => x.who === e.who);
+    if (next && next.start - e.start <= ESTIMATE_LIMIT) { e.ms = next.start - e.start; e.estimated = true; }
+  });
+  return out;
+}
+
+function timeByQuestion(sessions) {
+  const totals = new Map();
+  for (const e of sessions) {
+    if (e.ms === null) continue;
+    const t = totals.get(e.q) || { ms: 0, estimated: false };
+    t.ms += e.ms;
+    t.estimated = t.estimated || !!e.estimated;
+    totals.set(e.q, t);
+  }
+  return totals;
+}
+
+const outcome = (e) => (e.running ? 'Working' : e.legacy ? STATUS[e.to] || '' : { done: 'Done', stuck: 'Stuck', open: 'Released', working: 'Handed over' }[e.to] || '');
+const spentText = (e) => (e.ms === null ? '' : (e.estimated ? '≈' : '') + clock(e.ms));
+
+function timeCsv(doc, sessions, scenarios) {
+  const names = new Map(scenarios.map((s) => [s.id, s.name]));
+  const questions = doc.getMap('questions');
+  const cell = (v) => '"' + String(v === null || v === undefined ? '' : v).replace(/"/g, '""') + '"';
+  const iso = (t) => (t ? new Date(t).toISOString() : '');
+  const lines = [['scenario', 'question', 'title', 'who', 'started', 'ended', 'seconds', 'result', 'estimated'].join(',')];
+  for (const e of sessions) {
+    const q = questions.get(e.q);
+    lines.push([names.get(e.s) || '', e.n, q ? q.get('title') : '', e.who, iso(e.start), iso(e.end), e.ms === null ? '' : Math.round(e.ms / 1000), outcome(e), e.estimated ? 'yes' : ''].map(cell).join(','));
+  }
+  return lines.join('\r\n') + '\r\n';
+}
+
+function TimeLog({ room, scenarios, onClose }) {
+  const ref = useRef();
+  useEffect(() => { if (!ref.current.open) ref.current.showModal(); }, []);
+  const sessions = timeSessions(room.doc);
+  useTick(1000, sessions.some((e) => e.running));
+  const questions = room.doc.getMap('questions');
+  const names = new Map(scenarios.map((s) => [s.id, s.name]));
+  const total = (list) => list.reduce((n, e) => n + (e.ms || 0), 0);
+  const group = (key) => {
+    const groups = new Map();
+    for (const e of sessions) {
+      const k = e[key] || '';
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(e);
+    }
+    return [...groups.entries()].map(([k, list]) => ({ k, ms: total(list), questions: new Set(list.map((e) => e.q)).size })).sort((a, b) => b.ms - a.ms);
+  };
+  const estimated = sessions.some((e) => e.estimated);
+  const unknown = sessions.filter((e) => e.ms === null).length;
+  const when = (t) => new Date(t).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+
+  return html`
+    <dialog class="timelog" ref=${ref} aria-label="Time log" onClose=${onClose} onClick=${(e) => { if (e.target === ref.current) ref.current.close(); }}>
+      <header class="tl-head">
+        <h2>Time log</h2>
+        <span class="count">${sessions.length ? `${clock(total(sessions))} over ${new Set(sessions.map((e) => e.q)).size} questions` : ''}</span>
+        <span class="spacer"></span>
+        <button disabled=${!sessions.length} onClick=${() => download(`bots-time-${room.keys.room}-${stamp}.csv`, timeCsv(room.doc, sessions, scenarios), 'text/csv')}>Download CSV</button>
+        <button class="icon" aria-label="Close the time log" onClick=${() => ref.current.close()}><${Icon} name="close" /></button>
+      </header>
+      <div class="tl-body">
+        ${sessions.length === 0 && html`<p class="empty">Nothing yet. Time is recorded from <b>Take</b> until the question is marked Done, Stuck or Open again, per person, and kept here after the game.</p>`}
+        ${sessions.length > 0 && html`
+          <div class="tl-groups">
+            ${group('who').map((g) => html`<span class="tl-chip" key=${'w' + g.k}><${Avatar} name=${g.k || '?'} /><span>${g.k || 'Unknown'}</span><b>${clock(g.ms)}</b><span class="count">${g.questions} question${g.questions === 1 ? '' : 's'}</span></span>`)}
+          </div>
+          <div class="tl-groups">
+            ${group('s').map((g) => html`<span class="tl-chip" key=${'s' + g.k}><span>${names.get(g.k) || 'Deleted tab'}</span><b>${clock(g.ms)}</b></span>`)}
+          </div>
+          <div class="tl-table">
+            <table>
+              <thead><tr><th>Started</th><th>Scenario</th><th>#</th><th>Question</th><th>Who</th><th class="num">Time</th><th>Result</th></tr></thead>
+              <tbody>
+                ${sessions.map((e) => {
+                  const q = questions.get(e.q);
+                  return html`<tr key=${`${e.q}|${e.who}|${e.start}`} class=${e.running ? 'running' : ''}>
+                    <td class="nowrap">${when(e.start)}</td>
+                    <td>${names.get(e.s) || ''}</td>
+                    <td class="num">${e.n}</td>
+                    <td>${q ? q.get('title') || '' : html`<span class="count">deleted</span>`}</td>
+                    <td class="nowrap">${e.who}</td>
+                    <td class="num mono" title=${e.ms === null ? 'Only the start time was kept for this question' : e.estimated ? 'Estimated: until this person took their next question' : null}>${e.ms === null ? '—' : spentText(e)}</td>
+                    <td class="nowrap">${outcome(e)}</td>
+                  </tr>`;
+                })}
+              </tbody>
+            </table>
+          </div>
+          ${(estimated || unknown > 0) && html`<p class="fine">
+            ${estimated ? '≈ marks an estimate for a question answered before time logging existed: the time until the same person took their next question. Breaks in between are included. ' : ''}
+            ${unknown > 0 ? `${unknown} such question${unknown === 1 ? ' has' : 's have'} no usable end point and ${unknown === 1 ? 'shows' : 'show'} —.` : ''}
+          </p>`}`}
+      </div>
+    </dialog>`;
+}
+
+function Questions({ room, scenario, me, addRef, onShowLog }) {
   const questions = room.doc.getMap('questions');
   const rows = [];
   for (const [id, q] of questions) if (q.get('s') === scenario.id) rows.push({ id, q, n: q.get('n') || 0 });
@@ -386,6 +522,8 @@ function Questions({ room, scenario, me, addRef }) {
   const [flash, setFlash] = useState(null);
   const listRef = useRef();
   const done = rows.filter((r) => r.q.get('status') === 'done').length;
+  const spent = timeByQuestion(timeSessions(room.doc));
+  const tracked = rows.reduce((n, r) => n + ((spent.get(r.id) || {}).ms || 0), 0);
 
   const add = (text) => {
     const next = rows.reduce((m, r) => Math.max(m, r.n), 0) + 1;
@@ -408,15 +546,22 @@ function Questions({ room, scenario, me, addRef }) {
   };
 
   const setStatus = (q, status, id) => {
+    if ((q.get('status') || 'open') === status) return;
     room.doc.transact(() => {
+      logSession(room.doc, id, q, status);
       q.set('status', status);
-      if (status === 'working') { q.set('owner', me.name); q.set('started', Date.now()); }
-      if (status === 'open') { q.delete('owner'); q.delete('started'); }
+      if (status === 'working') { q.set('owner', me.name); q.set('started', Date.now()); } else q.delete('started');
+      if (status === 'open') q.delete('owner');
       if (status === 'done' && !q.get('owner')) q.set('owner', me.name);
     });
-    if (status === 'working' && id) {
+    if (status === 'working') {
       setTimeout(() => { const el = listRef.current && listRef.current.querySelector(`[data-q="${id}"] .q-answer`); if (el) el.focus(); }, 60);
     }
+  };
+
+  const remove = (q, id, n) => {
+    if ((q.get('answer') || q.get('title')) && !confirm(`Delete question ${n}?`)) return;
+    room.doc.transact(() => { logSession(room.doc, id, q, 'open'); questions.delete(id); });
   };
 
   return html`
@@ -424,6 +569,7 @@ function Questions({ room, scenario, me, addRef }) {
       <header class="panel-head">
         <h2>Questions</h2>
         <span class="count">${rows.length ? `${done}/${rows.length} answered` : ''}</span>
+        ${tracked > 0 && html`<button class="mini" title="Open the time log" onClick=${onShowLog}>${clock(tracked)} tracked</button>`}
         <input class="quick" ref=${addRef} placeholder="Add: 12 · 1-15 · 12 which IP scanned the site?" aria-label="Add questions"
           onKeyDown=${(e) => {
             if (e.key === 'Enter' && !e.isComposing && e.target.value.trim()) { add(e.target.value); e.target.value = ''; }
@@ -436,6 +582,7 @@ function Questions({ room, scenario, me, addRef }) {
           const owner = q.get('owner');
           const elapsed = status === 'working' && q.get('started') ? Date.now() - q.get('started') : 0;
           const over = elapsed > CONFIG.timeboxMinutes * 60000;
+          const total = spent.get(id);
           return html`
             <div key=${id} data-q=${id} class=${`q-row is-${status}${flash === id ? ' flash' : ''}`}>
               <span class="q-num">${n}</span>
@@ -444,17 +591,21 @@ function Questions({ room, scenario, me, addRef }) {
               <button class="icon" title="Copy answer" aria-label=${`Copy answer ${n}`} disabled=${!q.get('answer')} onClick=${() => copy(q.get('answer'), 'Answer copied')}><${Icon} name="copy" /></button>
               <span class="q-who">
                 ${owner ? html`<${Avatar} name=${owner} title=${`${owner}${status === 'working' ? ' is on it' : ''}`} />` : null}
-                ${status === 'working' ? html`<span class=${'q-time' + (over ? ' over' : '')} title=${over ? `Over the ${CONFIG.timeboxMinutes}-minute time-box: take the hint, swap or move on` : 'Time on this question'}>${clock(elapsed)}</span>` : null}
+                ${status === 'working'
+                  ? html`<span class=${'q-time' + (over ? ' over' : '')} title=${(over ? `Over the ${CONFIG.timeboxMinutes}-minute time-box: take the hint, swap or move on. ` : 'Time on this question. ') + (total && total.ms > elapsed + 1500 ? `Total so far: ${clock(total.ms)}.` : '')}>${clock(elapsed)}</span>`
+                  : total && total.ms
+                    ? html`<span class="q-time spent" title=${total.estimated ? 'Estimated time spent (see the time log)' : 'Time spent on this question'}>${total.estimated ? '≈' : ''}${clock(total.ms)}</span>`
+                    : null}
               </span>
               ${status === 'open' || status === 'stuck'
                 ? html`<button class="q-act" onClick=${() => setStatus(q, 'working', id)}>Take</button>`
                 : status === 'working'
-                  ? html`<button class="q-act good" onClick=${() => setStatus(q, 'done')}>Done</button>`
+                  ? html`<button class="q-act good" onClick=${() => setStatus(q, 'done', id)}>Done</button>`
                   : html`<span class="q-act placeholder"></span>`}
               <select class=${'q-status is-' + status} value=${status} aria-label=${`Status of question ${n}`} onChange=${(e) => setStatus(q, e.target.value, id)}>
                 ${Object.entries(STATUS).map(([k, label]) => html`<option value=${k}>${label}</option>`)}
               </select>
-              <button class="icon danger" title="Delete question" aria-label=${`Delete question ${n}`} onClick=${() => { if (!q.get('answer') && !q.get('title') || confirm(`Delete question ${n}?`)) questions.delete(id); }}><${Icon} name="close" /></button>
+              <button class="icon danger" title="Delete question" aria-label=${`Delete question ${n}`} onClick=${() => remove(q, id, n)}><${Icon} name="close" /></button>
             </div>`;
         })}
       </div>
@@ -853,6 +1004,8 @@ function exportMarkdown(room, scenarios) {
   const cell = (s) => String(s || '').replace(/\|/g, '\\|').replace(/\n/g, ' ');
   const out = [`# BOTS notes: ${room.keys.room}`, '', `Exported ${new Date().toLocaleString()}`, ''];
   const names = new Map(scenarios.map((s) => [s.id, s.name]));
+  const sessions = timeSessions(doc);
+  const spent = timeByQuestion(sessions);
   const iocs = [...doc.getMap('iocs').values()].sort((a, b) => (a.get('at') || 0) - (b.get('at') || 0));
   if (iocs.length) {
     out.push('## Indicators', '', '| Type | Value | First seen | Scenario | Note | By |', '| --- | --- | --- | --- | --- | --- |');
@@ -860,17 +1013,24 @@ function exportMarkdown(room, scenarios) {
     out.push('');
   }
   for (const s of scenarios) {
-    const qs = [...doc.getMap('questions').values()].filter((q) => q.get('s') === s.id).sort((a, b) => (a.get('n') || 0) - (b.get('n') || 0));
+    const qs = [...doc.getMap('questions').entries()].filter(([, q]) => q.get('s') === s.id).sort((a, b) => (a[1].get('n') || 0) - (b[1].get('n') || 0));
     const notes = doc.getText('notes/' + s.id).toString().trim();
     if (!qs.length && !notes) continue;
     out.push(`## ${s.name}`, '');
     if (s.indexes) out.push(`Indexes: ${s.indexes}`, '');
     if (qs.length) {
-      out.push('| # | Question | Answer | Status | Owner |', '| --- | --- | --- | --- | --- |');
-      for (const q of qs) out.push(`| ${q.get('n')} | ${cell(q.get('title'))} | ${q.get('answer') ? '`' + cell(q.get('answer')) + '`' : ''} | ${STATUS[q.get('status')] || ''} | ${cell(q.get('owner'))} |`);
+      out.push('| # | Question | Answer | Status | Owner | Time |', '| --- | --- | --- | --- | --- | --- |');
+      for (const [id, q] of qs) out.push(`| ${q.get('n')} | ${cell(q.get('title'))} | ${q.get('answer') ? '`' + cell(q.get('answer')) + '`' : ''} | ${STATUS[q.get('status')] || ''} | ${cell(q.get('owner'))} | ${spent.has(id) ? spentText(spent.get(id)) : ''} |`);
       out.push('');
     }
     if (notes) out.push('```', notes, '```', '');
+  }
+  if (sessions.length) {
+    const people = new Map();
+    for (const e of sessions) people.set(e.who, (people.get(e.who) || 0) + (e.ms || 0));
+    out.push('## Time', '', '| Who | Time on questions |', '| --- | --- |');
+    for (const [who, ms] of people) out.push(`| ${cell(who)} | ${clock(ms)} |`);
+    out.push('', 'The full log, one line per stretch of work, is in the Time log (Menu), which also exports CSV.', '');
   }
   return out.join('\n');
 }
@@ -887,6 +1047,7 @@ function Workspace({ room, session, onLeave }) {
   const [sheet, setSheet] = useState({ open: store(localStorage, 'bn.sheetOpen') === '1', expanded: false });
   const [jump, setJump] = useState(null);
   const [editing, setEditing] = useState(false);
+  const [showLog, setShowLog] = useState(false);
   const menuRef = useRef();
   const fileRef = useRef();
   const qRef = useRef();
@@ -933,7 +1094,7 @@ function Workspace({ room, session, onLeave }) {
       const t = e.target;
       const typing = t instanceof HTMLElement && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
       if (e.key === 'Escape' && typing) { t.blur(); return; }
-      if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (typing || e.ctrlKey || e.metaKey || e.altKey || document.querySelector('dialog[open]')) return;
       const focus = (ref) => { e.preventDefault(); if (ref.current) ref.current.focus(); };
       if (e.key === 'c') openSheet({ open: !live.current.sheet.open });
       else if (e.key === '/') { e.preventDefault(); openSheet({ open: true }); setTimeout(() => searchRef.current && searchRef.current.focus(), 30); }
@@ -1012,6 +1173,7 @@ function Workspace({ room, session, onLeave }) {
           <summary class="chip" aria-label="Room menu">Menu</summary>
           <div class="menu-panel menu-list">
             <button onClick=${() => { copy(invite, 'Invite link copied'); closeMenu(); }}>Copy invite link</button>
+            <button onClick=${() => { setShowLog(true); closeMenu(); }}>Time log</button>
             <button onClick=${() => { download(`bots-notes-${room.keys.room}-${stamp}.md`, exportMarkdown(room, scenarios), 'text/markdown'); closeMenu(); }}>Export notes as Markdown</button>
             <button onClick=${() => { download(`bots-notes-${room.keys.room}-${stamp}.backup.json`, JSON.stringify({ app: 'bots-notepad', room: room.keys.room, exported: new Date().toISOString(), update: b64(Y.encodeStateAsUpdate(doc)) }), 'application/json'); closeMenu(); }}>Download backup</button>
             <button onClick=${() => { fileRef.current.click(); closeMenu(); }}>Restore backup…</button>
@@ -1054,7 +1216,7 @@ function Workspace({ room, session, onLeave }) {
                 </span>
                 <button class="mini" onClick=${() => setEditing(true)}>Edit</button>`}
           </div>
-          <${Questions} key=${'q' + current.id} room=${room} scenario=${current} me=${me} addRef=${qRef} />
+          <${Questions} key=${'q' + current.id} room=${room} scenario=${current} me=${me} addRef=${qRef} onShowLog=${() => setShowLog(true)} />
           <section class="panel notes">
             <header class="panel-head"><h2>Notes</h2><span class="count">shared, saved as you type</span></header>
             <${SharedText} key=${'n' + current.id} inputRef=${notesRef} class="mono" ytext=${doc.getText('notes/' + current.id)}
@@ -1068,6 +1230,8 @@ function Workspace({ room, session, onLeave }) {
         <${Sheet} room=${room} me=${me} open=${sheet.open} expanded=${sheet.expanded} indexes=${current.indexes} jump=${jump} searchRef=${searchRef}
           onClose=${() => openSheet({ open: false })} onExpand=${() => openSheet({ expanded: !sheet.expanded })} />
       </div>
+
+      ${showLog && html`<${TimeLog} room=${room} scenarios=${scenarios} onClose=${() => setShowLog(false)} />`}
 
       <footer class="foot">
         <span><kbd>c</kbd> cheat sheet</span><span><kbd>/</kbd> search it</span><span><kbd>q</kbd> add question</span>
